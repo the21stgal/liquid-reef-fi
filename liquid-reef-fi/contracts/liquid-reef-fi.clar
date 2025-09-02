@@ -339,6 +339,127 @@
     (map-delete liquidity-migration { migrator: tx-sender })
     (ok true)))
 
+;; Yield Optimization Functions
+(define-public (rebalance-reef-position (guardian principal))
+  (let (
+    (current-reef (unwrap! (map-get? reef-positions { guardian: guardian }) ERR-REEF-NOT-FOUND))
+    (new-yield-score (unwrap! (update-yield-score guardian) ERR-INVALID-AMOUNT))
+  )
+    (asserts! (is-eq tx-sender guardian) ERR-UNAUTHORIZED)
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    
+    (map-set reef-positions 
+      { guardian: guardian }
+      (merge current-reef { 
+        yield-score: new-yield-score,
+        last-activity: block-height
+      }))
+    
+    (ok new-yield-score)))
+
+(define-public (update-guardian-reputation (guardian principal) (rating uint))
+  (let (
+    (current-reputation (default-to 
+      { base-score: u0, reef-rating: u0, synthesis-success-rate: u0, rebalancing-activity: u0 }
+      (map-get? guardian-reputation { guardian: guardian })))
+  )
+    (asserts! (var-get protocol-active) ERR-UNAUTHORIZED)
+    (asserts! (<= rating u100) ERR-INVALID-AMOUNT)
+    
+    (map-set guardian-reputation 
+      { guardian: guardian }
+      (merge current-reputation { 
+        reef-rating: rating,
+        rebalancing-activity: (+ (get rebalancing-activity current-reputation) u1)
+      }))
+    
+    (ok true)))
+
 ;; Read-only Functions
 (define-read-only (get-reef-position (guardian principal))
-  (map
+  (map-get? reef-positions { guardian: guardian }))
+
+(define-read-only (get-synthesis (id uint))
+  (map-get? position-synthesis { id: id }))
+
+(define-read-only (get-guardian-position (synthesis-id uint) (guardian principal))
+  (map-get? guardian-positions { synthesis-id: synthesis-id, guardian: guardian }))
+
+(define-read-only (get-insurance-balance)
+  (var-get insurance-balance))
+
+(define-read-only (get-total-reefs)
+  (var-get total-reefs))
+
+(define-read-only (get-protocol-status)
+  (var-get protocol-active))
+
+(define-read-only (get-migration (migrator principal))
+  (map-get? liquidity-migration { migrator: migrator }))
+
+(define-read-only (get-guardian-reputation (guardian principal))
+  (map-get? guardian-reputation { guardian: guardian }))
+
+(define-read-only (calculate-yield-power (guardian principal))
+  (let (
+    (guardian-reef (default-to 
+      { amount: u0, duration: u0, start-block: u0, yield-score: u0, rebalance-count: u0, last-activity: u0 }
+      (map-get? reef-positions { guardian: guardian })))
+  )
+    (calculate-dynamic-yield-weight (get amount guardian-reef) (get yield-score guardian-reef))))
+
+(define-read-only (get-synthesis-status (synthesis-id uint))
+  (let (
+    (synthesis (map-get? position-synthesis { id: synthesis-id }))
+  )
+    (match synthesis
+      syn {
+        synthesis-id: synthesis-id,
+        active: (and (<= block-height (get end-block syn)) (not (get executed syn))),
+        ended: (> block-height (get end-block syn)),
+        executed: (get executed syn),
+        winning: (> (get votes-for syn) (get votes-against syn))
+      }
+      { synthesis-id: synthesis-id, active: false, ended: false, executed: false, winning: false })))
+
+(define-read-only (get-next-synthesis-id)
+  (var-get next-synthesis-id))
+
+(define-read-only (get-reef-configuration (reef-id principal))
+  (map-get? reef-configurations { reef-id: reef-id }))
+
+(define-read-only (get-insurance-allocation (synthesis-id uint))
+  (map-get? insurance-allocations { synthesis-id: synthesis-id }))
+
+(define-read-only (get-yield-history (guardian principal) (period uint))
+  (map-get? yield-history { guardian: guardian, period: period }))
+
+(define-read-only (calculate-reef-health (guardian principal))
+  (let (
+    (reef-data (default-to 
+      { amount: u0, duration: u0, start-block: u0, yield-score: u0, rebalance-count: u0, last-activity: u0 }
+      (map-get? reef-positions { guardian: guardian })))
+    (blocks-since-activity (- block-height (get last-activity reef-data)))
+    (participation-score (get rebalance-count reef-data))
+  )
+    {
+      guardian: guardian,
+      health-score: (if (> blocks-since-activity u2880) ;; ~20 days
+        (/ (get yield-score reef-data) u2)
+        (get yield-score reef-data)),
+      active: (< blocks-since-activity u1440),
+      participation: participation-score
+    }))
+
+;; Emergency Functions
+(define-public (emergency-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set protocol-active false)
+    (ok true)))
+
+(define-public (emergency-resume)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set protocol-active true)
+    (ok true)))
